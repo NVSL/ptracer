@@ -1,0 +1,167 @@
+diff -ruN a/libipt/internal/include/pt_block_cache.h b/libipt/internal/include/pt_block_cache.h
+--- a/libipt/internal/include/pt_block_cache.h
++++ b/libipt/internal/include/pt_block_cache.h
+@@ -185,6 +185,12 @@
+ 	/* The number of cache entries. */
+ 	uint32_t nentries;
+ 
++	/* ptracer: the displacement of the conditional branch at
++	 * each offset, filled the first time it is taken (0 = not known yet;
++	 * INT32_MIN encodes a zero displacement).  Allocated lazily.
++	 */
++	int32_t *cdisp;
++
+ 	/* A variable-length array of @nentries entries. */
+ 	struct pt_bcache_entry entry[];
+ };
+diff -ruN a/libipt/src/pt_block_cache.c b/libipt/src/pt_block_cache.c
+--- a/libipt/src/pt_block_cache.c
++++ b/libipt/src/pt_block_cache.c
+@@ -45,11 +45,15 @@
+ 	if (SIZE_MAX < size)
+ 		return NULL;
+ 
+-	bcache = malloc((size_t) size);
++	/* ptracer: calloc, not malloc + memset.  A large cache is then
++	 * backed by fresh zero pages that are only faulted in when a block is
++	 * actually cached there, instead of touching every page up front (a
++	 * merged trampoline section spans gigabytes of mostly-unused vaddr).
++	 */
++	bcache = calloc(1, (size_t) size);
+ 	if (!bcache)
+ 		return NULL;
+ 
+-	memset(bcache, 0, (size_t) size);
+ 	bcache->nentries = (uint32_t) nentries;
+ 
+ 	return bcache;
+@@ -57,6 +61,8 @@
+ 
+ void pt_bcache_free(struct pt_block_cache *bcache)
+ {
++	if (bcache)
++		free(bcache->cdisp);
+ 	free(bcache);
+ }
+ 
+diff -ruN a/libipt/src/pt_block_decoder.c b/libipt/src/pt_block_decoder.c
+--- a/libipt/src/pt_block_decoder.c
++++ b/libipt/src/pt_block_decoder.c
+@@ -2253,7 +2253,15 @@
+ 			if (taken) {
+ 				struct pt_insn_ext iext;
+ 				struct pt_insn insn;
++				uint64_t ci = pt_msec_unmap(msec, ip);
++				int32_t cd = (bcache->cdisp && ci < bcache->nentries) ?
++					bcache->cdisp[ci] : 0;
+ 
++				if (cd) {
++					/* ptracer: displacement cached */
++					if (cd != INT32_MIN)
++						ip += (uint64_t) (int64_t) cd;
++				} else {
+ 				memset(&iext, 0, sizeof(iext));
+ 				memset(&insn, 0, sizeof(insn));
+ 
+@@ -2265,8 +2273,14 @@
+ 				if (status < 0)
+ 					return status;
+ 
+-				ip += (uint64_t) (int64_t)
+-					iext.variant.branch.displacement;
++				cd = iext.variant.branch.displacement;
++				if (!bcache->cdisp)
++					bcache->cdisp = calloc(bcache->nentries,
++							       sizeof(int32_t));
++				if (bcache->cdisp && ci < bcache->nentries)
++					bcache->cdisp[ci] = cd ? cd : INT32_MIN;
++				ip += (uint64_t) (int64_t) cd;
++				}
+ 			}
+ 
+ 			decoder->ip = ip + bce.isize;
+diff -ruN a/libipt/src/pt_ild.c b/libipt/src/pt_ild.c
+--- a/libipt/src/pt_ild.c
++++ b/libipt/src/pt_ild.c
+@@ -1433,3 +1433,45 @@
+ 
+ 	return pt_instruction_decode(insn, iext, &ild);
+ }
++
++/* ptracer: libipt's own length decoder and branch classification for ONE
++ * instruction, exported so that ptrecon can walk a callback-served (JIT) block exactly as libipt
++ * decoded it (Zydis rejects opcodes libipt's ILD accepts, e.g. 0x2f in 64-bit mode).
++ * Returns the size (> 0) or a negative pt_error_code.  *kind: 0 falls through, 1 direct jump/call
++ * (*disp valid), 2 any other control transfer. */
++extern pt_export int ptracer_ild_insn(const uint8_t *raw, uint8_t max, int *kind, int32_t *disp)
++{
++	struct pt_insn insn;
++	struct pt_insn_ext iext;
++	int errcode;
++
++	if (!raw || !kind || !disp || !max || max > sizeof(insn.raw))
++		return -pte_invalid;
++	memset(&insn, 0, sizeof(insn));
++	memset(&iext, 0, sizeof(iext));
++	insn.mode = ptem_64bit;
++	memcpy(insn.raw, raw, max);
++	insn.size = max;
++	errcode = pt_ild_decode(&insn, &iext);
++	if (errcode < 0)
++		return errcode;
++	*disp = 0;
++	switch (insn.iclass) {
++	case ptic_other:
++	case ptic_ptwrite:
++		*kind = 0;
++		break;
++	case ptic_call:
++	case ptic_jump:
++		if (iext.variant.branch.is_direct) {
++			*kind = 1;
++			*disp = iext.variant.branch.displacement;
++			break;
++		}
++		/* fall through */
++	default:
++		*kind = 2;
++		break;
++	}
++	return insn.size;
++}
+diff -ruN a/libipt/src/pt_image.c b/libipt/src/pt_image.c
+--- a/libipt/src/pt_image.c
++++ b/libipt/src/pt_image.c
+@@ -578,6 +578,16 @@
+ 	if (!image || !isid)
+ 		return -pte_internal;
+ 
++	/* ptracer: consult the read-memory callback FIRST.  The callback serves a JIT code
++	 * table that never overlaps a section and rejects everything else in O(log n); without
++	 * this every JIT instruction walked the whole section list (hundreds of entries). */
++	if (image->readmem.callback) {
++		status = pt_image_read_callback(image, isid, buffer, size,
++						asid, addr);
++		if (status != -pte_nomap)
++			return status;
++	}
++
+ 	errcode = pt_image_fetch_section(image, asid, addr);
+ 	if (errcode < 0) {
+ 		if (errcode != -pte_nomap)
+@@ -660,6 +670,15 @@
+ 	if (!image || !usec)
+ 		return -pte_internal;
+ 
++	/* ptracer: an address the read-memory callback serves has no section; say so
++	 * without walking the whole section list (the decoder then reads via the callback). */
++	if (image->readmem.callback) {
++		uint8_t probe;
++		if (image->readmem.callback(&probe, 1, asid, vaddr,
++					    image->readmem.context) > 0)
++			return -pte_nomap;
++	}
++
+ 	errcode = pt_image_fetch_section(image, asid, vaddr);
+ 	if (errcode < 0)
+ 		return errcode;

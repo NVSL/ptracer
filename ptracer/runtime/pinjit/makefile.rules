@@ -1,0 +1,9 @@
+TOOL_ROOTS := nooptool hifitool ablmemtool hififlow
+TEST_ROOTS :=
+
+# hifitool.cpp includes headers the kit's implicit rule does not track.
+$(OBJDIR)hifitool$(OBJ_SUFFIX): hifitool.cpp jitplan.h jitbridge.h ../jit/jitsite_format.h
+$(OBJDIR)nooptool$(OBJ_SUFFIX): nooptool.cpp
+$(OBJDIR)ablmemtool$(OBJ_SUFFIX): ablmemtool.cpp
+# hififlow.cpp compiles the HiFi tool (hififlowtool.cpp) in unchanged and adds the control-flow log.
+$(OBJDIR)hififlow$(OBJ_SUFFIX): hififlow.cpp hififlowtool.cpp jitplan_flow.h jitbridge.h ../jit/jitsite_format.h

@@ -1,0 +1,9 @@
+{
+ "source": "the published paper figure (Figure 6): bar heights relative to the uninstrumented (1x) bar, read once and cached here (approximate rendered-figure values, not raw measurements); bars above the figure's axis break use the printed labels",
+ "suites": ["poly", "mc", "pyperf", "rust", "node", "java"],
+ "series": {
+  "ptracer":      {"poly": 1.06, "mc": 3.71, "pyperf": 3.23, "rust": 1.07, "node": 5.92, "java": 5.50},
+  "wo_pt":        {"poly": 2.7,  "mc": 6.7,  "pyperf": 5.2,  "rust": 2.2,  "node": 16,   "java": 17},
+  "wo_pt_static": {"poly": 10,   "mc": 29,   "pyperf": 48,   "rust": 3.1,  "node": 51,   "java": 58}
+ }
+}

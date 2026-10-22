@@ -1,0 +1,7 @@
+{
+ "source": "the paper's offline-reconstruction figure: reconstruction time / uninstrumented run time with 96 workers, per suite the geometric mean over its cells, split into Intel PT decoding and execution",
+ "workers": 96,
+ "suites": ["poly", "mc", "pyperf", "rust", "node", "java"],
+ "total":  {"poly": 29.11, "mc": 15.47, "pyperf": 49.94, "rust": 54.59, "node": 87.47, "java": 73.76},
+ "decode": {"poly": 1.78,  "mc": 5.75,  "pyperf": 22.94, "rust": 9.51,  "node": 37.87, "java": 40.76}
+}
